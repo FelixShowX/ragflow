@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Fix missing tenant_model records for default models configured in tenant table.
+Fix missing tenant_model records for default models configured in tenant table,
+and repair common provider misconfigurations (e.g. Moonshot base_url missing /v1/).
 
 Usage:
     python tools/fix_default_models.py
@@ -72,6 +73,54 @@ def make_id(*parts):
     return hashlib.md5("".join(str(p) for p in parts).encode("utf-8")).hexdigest()
 
 
+def normalize_base_url(url: str) -> str:
+    """Return a clean base_url with a single trailing slash."""
+    if not url:
+        return url
+    return url.rstrip("/") + "/"
+
+
+def fix_moonshot_base_url(cursor, conn, now_ts, now_dt):
+    """Ensure Moonshot/Kimi instances use the /v1/ API path.
+
+    The OpenAI-compatible Kimi coding endpoint requires the path segment /v1/.
+    A base_url like https://api.kimi.com/coding/ results in 404 because the SDK
+    appends /chat/completions directly, producing /coding/chat/completions.
+    """
+    cursor.execute(
+        """
+        SELECT i.id, i.extra, p.provider_name, p.tenant_id
+        FROM tenant_model_instance i
+        JOIN tenant_model_provider p ON i.provider_id = p.id
+        WHERE p.provider_name = 'Moonshot'
+        """
+    )
+    fixed = []
+    for row in cursor.fetchall():
+        extra = row["extra"] or "{}"
+        try:
+            extra_obj = json.loads(extra)
+        except json.JSONDecodeError:
+            extra_obj = {}
+        base_url = extra_obj.get("base_url", "")
+        if not base_url:
+            continue
+        normalized = normalize_base_url(base_url)
+        # Kimi OpenAI-compatible endpoints need /coding/v1/ (or /v1/ for standard endpoint)
+        if "/kimi.com/" in normalized and not normalized.endswith("/v1/"):
+            # Convert .../coding/ -> .../coding/v1/
+            # Convert .../coding    -> .../coding/v1/
+            # Convert .../v1        -> .../v1/
+            new_url = normalized.rstrip("/") + "/v1/"
+            extra_obj["base_url"] = new_url
+            cursor.execute(
+                "UPDATE tenant_model_instance SET extra=%s, update_time=%s, update_date=%s WHERE id=%s",
+                (json.dumps(extra_obj, ensure_ascii=False), now_ts, now_dt, row["id"]),
+            )
+            fixed.append(f"tenant={row['tenant_id']} Moonshot instance {row['id']}: {base_url} -> {new_url}")
+    return fixed
+
+
 def main():
     import pymysql
 
@@ -88,6 +137,11 @@ def main():
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
+        # Repair Moonshot/Kimi base_url misconfigurations first.
+        now_ts = int(time.time() * 1000)
+        now_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        url_fixed = fix_moonshot_base_url(cursor, conn, now_ts, now_dt)
+
         # 1. Load all tenants with their default model refs
         cursor.execute("SELECT id, name, " + ", ".join(c[0] for c in DEFAULT_MODEL_COLUMNS) + " FROM tenant")
         tenants = cursor.fetchall()
@@ -174,6 +228,9 @@ def main():
         print("=" * 60)
         print("fix_default_models.py result")
         print("=" * 60)
+        print(f"Base URL repairs: {len(url_fixed)}")
+        for item in url_fixed:
+            print(f"  ~ {item}")
         print(f"Fixed/inserted: {len(fixed)}")
         for item in fixed:
             print(f"  + {item}")

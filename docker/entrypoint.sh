@@ -271,6 +271,14 @@ if [[ "${INIT_MODEL_PROVIDER_TABLES}" -eq 1 ]]; then
     echo "Model provider table migrations completed."
 fi
 
+# Repair any runtime inconsistencies in tenant model configuration (e.g. missing
+# default model records or provider base_urls that omit required /v1/ path).
+if [ -f /ragflow/tools/fix_default_models.py ]; then
+    echo "Running default model repair script..."
+    "$PY" /ragflow/tools/fix_default_models.py || true
+    echo "Default model repair completed."
+fi
+
 if [[ "${ENABLE_ADMIN_SERVER}" -eq 1 ]]; then
     if [[ "${API_PROXY_SCHEME}" == "hybrid" ]] || [[ "${API_PROXY_SCHEME}" == "python" ]]; then
         while true; do
