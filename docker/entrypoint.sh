@@ -5,6 +5,12 @@ set -e
 echo "Start RAGFlow cluster, version: "
 cat /ragflow/VERSION
 
+# Patch DashScope SDK retry behaviour early so all model calls benefit.
+if [ -f /ragflow/tools/patch_dashscope_retry.py ]; then
+    echo "Patching DashScope SDK retry adapter..."
+    python3 /ragflow/tools/patch_dashscope_retry.py || true
+fi
+
 # -----------------------------------------------------------------------------
 # Usage and command-line argument parsing
 # -----------------------------------------------------------------------------

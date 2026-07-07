@@ -389,20 +389,31 @@ class QWenEmbed(Base):
         texts = [truncate(t, 2048) for t in texts]
         for i in range(0, len(texts), batch_size):
             retry_max, retry_wait_secs = 5, 10
+            resp = None
             for retry in range(retry_max):
-                with _dashscope_native_api_url_scope(self._dashscope_http_api_url):
-                    resp = dashscope.TextEmbedding.call(model=self.model_name, input=texts[i : i + batch_size], api_key=self.key, text_type="document")
-                status_code = resp.status_code
-                if status_code >= 400 and status_code < 500 and status_code not in [408, 429]:
-                    # No need to retry for 4XX error
-                    raise ModelException(f"Error, status: {status_code}, response: {resp}")
-                if status_code == 200:
-                    break
-                if retry < retry_max - 1:
-                    logging.warning(f"Got error response from DashScope API (status: {status_code}, response: {resp}). Wait {retry_wait_secs} seconds. Retrying...")
-                    time.sleep(retry_wait_secs)
-                else:
-                    raise ModelException(f"Error after {retry_max} retries, status: {status_code}, response: {resp}")
+                try:
+                    with _dashscope_native_api_url_scope(self._dashscope_http_api_url):
+                        resp = dashscope.TextEmbedding.call(model=self.model_name, input=texts[i : i + batch_size], api_key=self.key, text_type="document")
+                    status_code = resp.status_code
+                    if status_code >= 400 and status_code < 500 and status_code not in [408, 429]:
+                        # No need to retry for 4XX error
+                        raise ModelException(f"Error, status: {status_code}, response: {resp}")
+                    if status_code == 200:
+                        break
+                    if retry < retry_max - 1:
+                        logging.warning(f"Got error response from DashScope API (status: {status_code}, response: {resp}). Wait {retry_wait_secs} seconds. Retrying...")
+                        time.sleep(retry_wait_secs)
+                    else:
+                        raise ModelException(f"Error after {retry_max} retries, status: {status_code}, response: {resp}")
+                except ModelException:
+                    raise
+                except Exception as e:
+                    if retry < retry_max - 1:
+                        logging.warning(f"DashScope embedding request failed ({e}). Wait {retry_wait_secs} seconds. Retrying...")
+                        time.sleep(retry_wait_secs)
+                    else:
+                        logger.exception("QWenEmbed: failed after %d retries", retry_max)
+                        raise EmbeddingError(f"Embedding request failed for QWenEmbed after {retry_max} retries. Error: {e}") from e
             try:
                 embds = [[] for _ in range(len(resp["output"]["embeddings"]))]
                 for e in resp["output"]["embeddings"]:
@@ -415,12 +426,29 @@ class QWenEmbed(Base):
         return np.array(res), token_count
 
     def encode_queries(self, text):
-        with _dashscope_native_api_url_scope(self._dashscope_http_api_url):
-            resp = dashscope.TextEmbedding.call(model=self.model_name, input=text[:2048], api_key=self.key, text_type="query")
-        status_code = resp.status_code
-        if status_code != 200:
-            raise ModelException(f"Error: status: {status_code}: code: {resp.get('code')}, message: {resp.get('message')}")
-            # No need to retry for 4XX error
+        import time
+
+        import dashscope
+
+        retry_max, retry_wait_secs = 5, 10
+        resp = None
+        for retry in range(retry_max):
+            try:
+                with _dashscope_native_api_url_scope(self._dashscope_http_api_url):
+                    resp = dashscope.TextEmbedding.call(model=self.model_name, input=text[:2048], api_key=self.key, text_type="query")
+                status_code = resp.status_code
+                if status_code != 200:
+                    raise ModelException(f"Error: status: {status_code}: code: {resp.get('code')}, message: {resp.get('message')}")
+                break
+            except ModelException:
+                raise
+            except Exception as e:
+                if retry < retry_max - 1:
+                    logging.warning(f"DashScope query embedding request failed ({e}). Wait {retry_wait_secs} seconds. Retrying...")
+                    time.sleep(retry_wait_secs)
+                else:
+                    logger.exception("QWenEmbed: failed to encode query after %d retries", retry_max)
+                    raise EmbeddingError(f"Query embedding request failed for QWenEmbed after {retry_max} retries. Error: {e}") from e
         try:
             return np.array(resp["output"]["embeddings"][0]["embedding"]), total_token_count_from_response(resp)
         except Exception as _e:
