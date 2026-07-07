@@ -23,10 +23,13 @@ Provides parser factory and document chunking logic:
 """
 
 import logging
+import traceback
+from datetime import datetime
 from timeit import default_timer as timer
 from typing import Dict, List
 
 from common.constants import ParserType
+from common.exceptions import TaskCanceledException
 from common.misc_utils import thread_pool_exec
 from rag.svr.task_executor_refactor.task_context import TaskContext
 
@@ -103,9 +106,20 @@ async def run_chunking(
         logging.info("Chunking({}) {}/{} done".format(timer() - st, ctx.location, ctx.name))
         ctx.recording_context.record("parser_config_after_merge", parser_config)
         return cks
+    except TaskCanceledException:
+        raise
     except Exception as e:
+        err_file = "/ragflow/logs/chunk_error_{}_{}.log".format(
+            getattr(ctx, "doc_id", "unknown"), datetime.now().strftime("%Y%m%d%H%M%S")
+        )
+        try:
+            with open(err_file, "w") as ef:
+                ef.write("Chunking {}/{} got exception: {}\n".format(ctx.location, ctx.name, e))
+                traceback.print_exc(file=ef)
+        except Exception as dump_err:
+            logging.error("Failed to write chunk error dump to %s: %s", err_file, dump_err)
+        logging.exception("Chunking {}/{} got exception; traceback also at {}".format(ctx.location, ctx.name, err_file))
         ctx.progress_cb(-1, msg="Internal server error while chunking: %s" % str(e).replace("'", ""))
-        logging.exception("Chunking {}/{} got exception".format(ctx.location, ctx.name))
         raise
 
 

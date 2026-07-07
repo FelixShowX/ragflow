@@ -37,6 +37,7 @@ import socket
 import random
 import sys
 import threading
+import traceback
 
 from api.db import PIPELINE_SPECIAL_PROGRESS_FREEZE_TASK_TYPES
 from api.db.services.knowledgebase_service import KnowledgebaseService
@@ -351,8 +352,17 @@ async def build_chunks(task, progress_callback):
     except TaskCanceledException:
         raise
     except Exception as e:
+        err_file = "/ragflow/logs/chunk_error_{}_{}.log".format(
+            task.get("doc_id", "unknown"), datetime.now().strftime("%Y%m%d%H%M%S")
+        )
+        try:
+            with open(err_file, "w") as ef:
+                ef.write("Chunking {}/{} got exception: {}\n".format(task["location"], task["name"], e))
+                traceback.print_exc(file=ef)
+        except Exception as dump_err:
+            logging.error("Failed to write chunk error dump to %s: %s", err_file, dump_err)
+        logging.exception("Chunking {}/{} got exception; traceback also at {}".format(task["location"], task["name"], err_file))
         progress_callback(-1, "Internal server error while chunking: %s" % str(e).replace("'", ""))
-        logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
 
     # Record raw chunks for comparison
